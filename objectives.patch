@@ -1,0 +1,206 @@
+diff --git a/src/objective/crunch_custom_objective.hpp b/src/objective/crunch_custom_objective.hpp
+new file mode 100644
+index 0000000..e590b76
+--- /dev/null
++++ b/src/objective/crunch_custom_objective.hpp
+@@ -0,0 +1,165 @@
++
++#ifndef LIGHTGBM_PAIRWISE_RANK_OBJECTIVE_HPP_
++#define LIGHTGBM_PAIRWISE_RANK_OBJECTIVE_HPP_
++
++#include <LightGBM/meta.h>
++#include <LightGBM/objective_function.h>
++#include <LightGBM/utils/common.h>
++
++#include <random>
++
++namespace LightGBM {
++
++class PairwiseRankLoss: public ObjectiveFunction {
++ public:
++  explicit PairwiseRankLoss(const Config& config)
++      : n_pair_iter_(100) {
++  }
++
++  explicit PairwiseRankLoss(const std::vector<std::string>&)
++      : n_pair_iter_(100) {
++  }
++
++  virtual ~PairwiseRankLoss() {
++  }
++
++  void Init(const Metadata& metadata, data_size_t) override {
++    label_ = metadata.label();
++    num_queries_ = metadata.num_queries();
++    query_boundaries_ = metadata.query_boundaries();
++    if (query_boundaries_ == nullptr) {
++        Log::Fatal("Pairwise rank objective requires query information");
++    }
++    
++  }
++
++  void GetGradients(const double* score, score_t* gradients,
++                    score_t* hessians) const override {
++    std::random_device rd;
++    std::mt19937 mother_rng(rd());
++    
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
++    for (int i = 0; i < num_queries_; i++) {
++        auto lower_bound = i ==0 ? 0 : query_boundaries_[i-1];
++        auto curr_query_size = query_boundaries_[i] - lower_bound;
++        if (curr_query_size < 2) {continue;}
++
++        std::mt19937 rng(mother_rng());
++        std::vector<int> index;
++        for (auto j = lower_bound; j< query_boundaries_[i]; j++){
++            index.emplace_back(j);
++            gradients[j] = 0;
++            hessians[j] = 1;
++        }
++        for (auto j = 0; j < n_pair_iter_; j++) {
++            std::shuffle(index.begin(), index.end(), rng);
++            for (auto k = 0; k < curr_query_size/2; k++){
++                if (label_[index[k]] > label_[index[curr_query_size-1-k]]) {
++                    double diff = score[index[k]] - score[index[curr_query_size-1-k]];
++                    double tmp = 1/(1 + std::exp(diff));
++                    gradients[index[k]] += tmp;
++                    gradients[index[curr_query_size-1-k]] -= tmp;
++
++                } else if (label_[index[k]] < label_[index[curr_query_size-1-k]]) {
++                    double diff = score[index[k]] - score[index[curr_query_size-1-k]];
++                    double tmp = 1/(1 + std::exp(diff));
++                    gradients[index[k]] += (tmp-1);
++                    gradients[index[curr_query_size-1-k]] -= (tmp-1);
++                    
++                } else {
++                    double diff = score[index[k]] - score[index[curr_query_size-1-k]];
++                    double tmp = 1/(1 + std::exp(diff)) ;
++                    gradients[index[k]] += (tmp-0.5);
++                    gradients[index[curr_query_size-1-k]] -= (tmp-0.5);
++
++                }
++            }
++        }
++
++        for (auto j = lower_bound; j< query_boundaries_[i]; j++){
++            gradients[j] /= n_pair_iter_;
++            gradients[j] *= -1;
++        }
++    }    
++  }
++
++  const char* GetName() const override {
++    return "pairwise_rank";
++  }
++
++  std::string ToString() const override {
++    return "pairwise_rank";
++  }
++
++ private:
++  const label_t* label_;
++  const data_size_t* query_boundaries_;
++  data_size_t num_queries_;
++  const int n_pair_iter_;
++};
++
++
++class OrdinalRegLoss: public ObjectiveFunction {
++ public:
++  explicit OrdinalRegLoss(const Config& config){
++
++  }
++
++  explicit OrdinalRegLoss(const std::vector<std::string>&){
++
++  }
++
++  virtual ~OrdinalRegLoss() {
++  }
++
++  void Init(const Metadata& metadata, data_size_t) override {
++    label_ = metadata.label();
++    num_queries_ = metadata.num_queries();
++    query_boundaries_ = metadata.query_boundaries();
++    if (query_boundaries_ == nullptr) {
++        Log::Fatal("Pairwise rank objective requires query information");
++    }
++    
++  }
++
++  void GetGradients(const double* score, score_t* gradients,
++                    score_t* hessians) const override {
++    
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
++    for (int i = 0; i < num_queries_; i++) {
++        auto lower_bound = i ==0 ? 0 : query_boundaries_[i-1];
++        auto curr_query_size = query_boundaries_[i] - lower_bound;
++        if (curr_query_size < 2) {continue;}
++
++        for (auto j = lower_bound; j< query_boundaries_[i]; j++){
++            gradients[j] = 0;
++            hessians[j] = 1;
++            double tmp = 0;
++
++            gradients[j] += Common::Sign(label_[j]-0.1)/(1+std::exp(Common::Sign(label_[j]- 0.1)*(score[j]+2.5)));
++            gradients[j] += Common::Sign(label_[j]-0.3)/(1+std::exp(Common::Sign(label_[j]- 0.3)*(score[j]+1.5)));
++            gradients[j] += Common::Sign(label_[j]-0.4)/(1+std::exp(Common::Sign(label_[j]- 0.4)*(score[j]+0.5)));
++            gradients[j] += Common::Sign(label_[j]-0.6)/(1+std::exp(Common::Sign(label_[j]- 0.6)*(score[j]-0.5)));
++            gradients[j] += Common::Sign(label_[j]-0.7)/(1+std::exp(Common::Sign(label_[j]- 0.7)*(score[j]-1.5)));
++            gradients[j] += Common::Sign(label_[j]-0.9)/(1+std::exp(Common::Sign(label_[j]- 0.9)*(score[j]-2.5)));
++            gradients[j] *=-1;
++        }
++
++    }
++  }
++
++  const char* GetName() const override {
++    return "ordinal_reg";
++  }
++
++  std::string ToString() const override {
++    return "ordinal_reg";
++  }
++
++ private:
++  const label_t* label_;
++  const data_size_t* query_boundaries_;
++  data_size_t num_queries_;
++};
++}
++#endif
+\ No newline at end of file
+diff --git a/src/objective/objective_function.cpp b/src/objective/objective_function.cpp
+index a203017..9c7c0f0 100644
+--- a/src/objective/objective_function.cpp
++++ b/src/objective/objective_function.cpp
+@@ -9,6 +9,7 @@
+ #include "rank_objective.hpp"
+ #include "regression_objective.hpp"
+ #include "xentropy_objective.hpp"
++#include "crunch_custom_objective.hpp"
+ 
+ #include "cuda/cuda_binary_objective.hpp"
+ #include "cuda/cuda_multiclass_objective.hpp"
+@@ -99,6 +100,10 @@ ObjectiveFunction* ObjectiveFunction::CreateObjectiveFunction(const std::string&
+       return new RegressionTweedieLoss(config);
+     } else if (type == std::string("custom")) {
+       return nullptr;
++    } else if (type == std::string("pairwise_rank")) {
++      return new PairwiseRankLoss(config);
++    } else if (type == std::string("ordinal_reg")) {
++      return new OrdinalRegLoss(config);
+     }
+   #ifdef USE_CUDA
+   }
+@@ -144,6 +149,10 @@ ObjectiveFunction* ObjectiveFunction::CreateObjectiveFunction(const std::string&
+     return new RegressionTweedieLoss(strs);
+   } else if (type == std::string("custom")) {
+     return nullptr;
++  } else if (type == std::string("pairwise_rank")) {
++      return new PairwiseRankLoss(strs);
++  } else if (type == std::string("ordinal_reg")) {
++      return new OrdinalRegLoss(strs);
+   }
+   Log::Fatal("Unknown objective type name: %s", type.c_str());
+   return nullptr;

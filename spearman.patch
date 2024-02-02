@@ -1,0 +1,140 @@
+diff --git a/python-package/lightgbm/basic.py b/python-package/lightgbm/basic.py
+index 5c3a32a..a846821 100644
+--- a/python-package/lightgbm/basic.py
++++ b/python-package/lightgbm/basic.py
+@@ -4948,5 +4948,5 @@ class Booster:
+                     string_buffers[i].value.decode('utf-8') for i in range(self.__num_inner_eval)
+                 ]
+                 self.__higher_better_inner_eval = [
+-                    name.startswith(('auc', 'ndcg@', 'map@', 'average_precision')) for name in self.__name_inner_eval
++                    name.startswith(('auc', 'ndcg@', 'map@', 'average_precision', 'spearman')) for name in self.__name_inner_eval
+                 ]
+diff --git a/src/metric/crunch_custom_metric.hpp b/src/metric/crunch_custom_metric.hpp
+new file mode 100644
+index 0000000..4b144b9
+--- /dev/null
++++ b/src/metric/crunch_custom_metric.hpp
+@@ -0,0 +1,101 @@
++#ifndef LIGHTGBM_CRUNCH_CUSTOM_METRIC_HPP_
++#define LIGHTGBM_CRUNCH_CUSTOM_METRIC_HPP_
++
++#include <LightGBM/metric.h>
++#include <LightGBM/utils/openmp_wrapper.h>
++#include <LightGBM/utils/log.h>
++
++#include <utility>
++#include <algorithm>
++#include <numeric>
++
++namespace LightGBM {
++
++class SpearmanMetric: public Metric {
++public:
++    explicit SpearmanMetric([[maybe_unused]] const Config& config) {
++    }
++
++    virtual ~SpearmanMetric() {
++    }
++
++    void Init(const Metadata& metadata, data_size_t num_data) override {
++        name_.emplace_back("spearman");
++        num_data_ = num_data;
++
++        // Get the information about targets and queries
++        label_ = metadata.label();
++        num_queries_ = metadata.num_queries();
++        query_boundaries_ = metadata.query_boundaries();
++        if (query_boundaries_ == nullptr) {
++            Log::Fatal("The Spearman Correlation metric requires query information");
++        }
++        
++            
++    }
++
++    std::vector<double> Eval(const double* score, const ObjectiveFunction*) const override {
++        
++        double sum=0;
++        int count=0;
++        #pragma omp parallel for reduction(+ : sum, count)
++        for (auto i = 0; i< num_queries_; i++) {
++            std::vector<std::pair<label_t, int>> score_tmps;
++            std::vector<std::pair<label_t, int>> label_tmps;
++            
++            auto lower_bound = i == 0? 0 : query_boundaries_[i-1];
++            for (auto ptr = lower_bound; ptr < query_boundaries_[i]; ptr++) {
++                auto local_idx = ptr -lower_bound;
++                score_tmps.emplace_back(std::make_pair(score[ptr], local_idx));
++                label_tmps.emplace_back(std::make_pair(label_[ptr], local_idx));
++            }
++            auto curr_query_size = query_boundaries_[i] - lower_bound;
++            std::stable_sort(score_tmps.begin(),
++                             score_tmps.begin() + curr_query_size);
++            std::stable_sort(label_tmps.begin(),
++                             label_tmps.begin() + curr_query_size);
++
++            std::vector<double> label_ids(curr_query_size,0.0);
++            std::vector<double> score_ids(curr_query_size,0.0);
++
++            auto rank_mean = (curr_query_size-1)/2.0;
++            for (auto j = 0; j < curr_query_size; j++) {
++                auto score_idx = score_tmps[j].second;
++                score_ids[score_idx] = (j - rank_mean);
++                auto label_idx = label_tmps[j].second;
++                label_ids[label_idx]= (j -rank_mean);
++            }
++            
++        
++            auto covar = std::inner_product(score_ids.begin(),
++                                           score_ids.begin()+curr_query_size,
++                                           label_ids.begin(),
++                                           0.0);
++            auto vars = (curr_query_size-1)*curr_query_size*(2*curr_query_size-1)/6.0;
++            if (vars >0){
++                sum += covar/vars;
++                count += 1;
++            }
++        }
++        
++        return std::vector<double>(1, sum/count);
++    }
++
++    double factor_to_bigger_better() const override {
++        return 1.0f;
++    }
++
++    const std::vector<std::string>& GetName() const override{
++        return name_;
++    }
++
++private:
++    data_size_t num_data_;
++    data_size_t num_queries_;
++    const data_size_t* query_boundaries_;
++    const label_t* label_;
++    std::vector<std::string> name_;
++};
++}
++
++#endif
+\ No newline at end of file
+diff --git a/src/metric/metric.cpp b/src/metric/metric.cpp
+index 531ef56..a99432b 100644
+--- a/src/metric/metric.cpp
++++ b/src/metric/metric.cpp
+@@ -10,6 +10,7 @@
+ #include "rank_metric.hpp"
+ #include "regression_metric.hpp"
+ #include "xentropy_metric.hpp"
++#include "crunch_custom_metric.hpp"
+ 
+ #include "cuda/cuda_binary_metric.hpp"
+ #include "cuda/cuda_regression_metric.hpp"
+@@ -125,6 +126,8 @@ Metric* Metric::CreateMetric(const std::string& type, const Config& config) {
+       return new GammaDevianceMetric(config);
+     } else if (type == std::string("tweedie")) {
+       return new TweedieMetric(config);
++    } else if (type == std::string("spearman")) {
++      return new SpearmanMetric(config);
+     }
+   #ifdef USE_CUDA
+   }
